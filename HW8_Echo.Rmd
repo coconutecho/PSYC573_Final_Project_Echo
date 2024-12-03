@@ -1,0 +1,90 @@
+---
+title: "HW8_echo"
+output: pdf
+author: Echo (Wenyi) Xu
+date: "2024-12-03"
+---
+Research Question: 
+How do activity categories influence caregivers' moment-to-moment emotions?
+
+Variables
+- `Activity.Category`: activity that caregivers' were doing when completing the questionnaires: Productive, Social_Face, Social_Virtual, Screen_Time_Leisure, Exercise, Rest_Sleep, Baby_Care
+- `Composite`: Emotion Composite: Positve Affect, Negative Affect 
+- `value_wc`: Emotion Value from -5 (very unhappy) to 5 (happy)
+
+```{r}
+# Load the packages
+library(dplyr)
+library(tidyr)
+library(nlme)
+library(ggplot2)
+
+## Data Import
+load("/Volumes/data/Studies/STAR/Data/EMA/Saved Environments/data_11_20_2024.RData") 
+dfm$Doing <- tolower(dfm$Doing)
+```
+
+```{r}
+# variable specification
+dfm$Doing <- gsub("e.g.,", "e.g.", dfm$Doing)
+# Define groups
+productive <- c("work or other productive activities", "chores/errands", 
+                "personal maintenance", 
+                "transit")
+social_face <- c("socializing face-to-face")
+social_virtual <- c("socializing virtually")
+screen_time_leisure <- c("movies", "using social media") 
+exercise <- c("exercising/playing a sport")
+rest_sleep <- c("sleeping/napping", "doing absolutely nothing")
+baby_care <- c("feeding the baby", "changing the baby")
+
+# Classify activities into categories, accounting for multiple selections
+dfm <- dfm %>% 
+  mutate(
+    Productive = ifelse(grepl(paste(productive, collapse = "|"), Doing, ignore.case = TRUE), "Productive Activities", NA),
+    Social_Face = ifelse(grepl(paste(social_face, collapse = "|"), Doing, ignore.case = TRUE), "Socializing Face-to-Face", NA),
+    Social_Virtual = ifelse(grepl(paste(social_virtual, collapse = "|"), Doing, ignore.case = TRUE), "Socializing Virtually", NA),
+    Screen_Time_Leisure = ifelse(grepl(paste(screen_time_leisure, collapse = "|"), Doing, ignore.case = TRUE), "Screen Time (Leisure)", NA),
+    Exercise = ifelse(grepl(paste(exercise, collapse = "|"), Doing, ignore.case = TRUE), "Exercise", NA),
+    Rest_Sleep = ifelse(grepl(paste(rest_sleep, collapse = "|"), Doing, ignore.case = TRUE), "Rest and Sleep", NA),
+    Baby_Care = ifelse(grepl(paste(baby_care, collapse = "|"), Doing, ignore.case = TRUE), "Baby Care", NA)
+  ) %>% 
+  rowwise() %>%
+  mutate(
+    Activity.Category = paste(na.omit(unique(c(Productive, Social_Face, Social_Virtual, Screen_Time_Leisure, Exercise, Rest_Sleep, Baby_Care))), collapse = ", "),
+    Activity.Category = ifelse(Activity.Category == "" & !is.na(Doing), "Other", Activity.Category) # Label all others as "Other"
+  ) %>%
+  ungroup() # %>%
+  # select(-Productive, -Social_Face, -Social_Virtual, -Screen_Time_Leisure, -Exercise, -Rest_Sleep, -Baby_Care) # Remove intermediate columns
+```
+
+```{r}
+## Model
+# Changing the reference 
+dfm.ag$Activity.Category <- relevel(as.factor(dfm.ag$Activity.Category), ref="Rest and Sleep")
+
+# Comparing a big model with positive and negative affect
+Activity.Category.fit <- lme(value_wc ~  Composite*Activity.Category, data=dfm.ag[!dfm.ag$Activity.Category %in% c("Mix") & dfm.ag$Composite %in% c("NegAff", "PosAff"),], random=~1 | record_id, na.action=na.omit)
+anova(Activity.Category.fit) 
+summary(Activity.Category.fit) 
+
+# Comparing activity catergory for negative affect
+Activity.Category.fit <- lme(value_wc ~ Activity.Category, random=~1 | record_id, na.action=na.omit, data=dfm.ag[!dfm.ag$Activity.Category %in% c("Mix") & dfm.ag$Composite %in% c("NegAff"),], control=lmeControl(opt='optim'))
+
+# Comparing alone, baby, close, and distant for Positive affect
+Activity.Category.fit <- lme(value_wc ~ Activity.Category, random=~1 | record_id, na.action=na.omit, data=dfm.ag[!dfm.ag$Activity.Category %in% c("Mix") & dfm.ag$Composite %in% c("PosAff"),], control=lmeControl(opt='optim'))
+```
+
+```{r}
+## Results
+# Table showing distribution of all unique categories
+social_table <- as.data.frame(table(dfm$Activity.Category))
+print(social_table)
+
+ggplot(dfm.ag[!is.na(dfm.ag$Activity.Category) & dfm.ag$Composite != "Other" & dfm.ag$Activity.Category != "Mix",], aes(x = Composite, y = value, fill = Activity.Category)) + my_opts +
+  stat_summary(fun.y = mean, geom = "bar", position=position_dodge(width=0.95), alpha = .7) +
+  stat_summary(fun.data = mean_cl_boot, geom = "errorbar", width=.3, position=position_dodge(width=0.95)) +
+  labs(x = "Emotion", y = "How do you feel right now?") +
+  my_opts + coord_cartesian(ylim=c(1,3.5)) +
+  theme(legend.position = "none")
+```
