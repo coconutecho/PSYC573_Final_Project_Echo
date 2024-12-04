@@ -1,16 +1,15 @@
 ---
 title: "HW8_echo"
-output: pdf
-author: Echo (Wenyi) Xu
-date: "2024-12-03"
+format: pdf
+author: "Echo (Wenyi) Xu"
+editor: visual
+embed-resources: true
+eval: true
 ---
-Research Question: 
-How do activity categories influence caregivers' moment-to-moment emotions?
 
-Variables
-- `Activity.Category`: activity that caregivers' were doing when completing the questionnaires: Productive, Social_Face, Social_Virtual, Screen_Time_Leisure, Exercise, Rest_Sleep, Baby_Care
-- `Composite`: Emotion Composite: Positve Affect, Negative Affect 
-- `value_wc`: Emotion Value from -5 (very unhappy) to 5 (happy)
+Research Question: How do activity categories influence caregivers' moment-to-moment emotions?
+
+Variables - `Activity.Category`: activity that caregivers' were doing when completing the questionnaires: Productive, Social_Face, Social_Virtual, Screen_Time_Leisure, Exercise, Rest_Sleep, Baby_Care - `Composite`: Emotion Composite: Positve Affect, Negative Affect; value from 1 - 5 - `value_wc`: Centered Emotion within and between person
 
 ```{r}
 # Load the packages
@@ -18,6 +17,14 @@ library(dplyr)
 library(tidyr)
 library(nlme)
 library(ggplot2)
+library(here)
+library(brms)
+library(readxl)  # for reading excel files
+library(modelsummary)  # for summarizing data
+library(cmdstanr)  # use two cores
+library(posterior)
+library(bayesplot)
+library(knitr)
 
 ## Data Import
 load("/Volumes/data/Studies/STAR/Data/EMA/Saved Environments/data_11_20_2024.RData") 
@@ -25,8 +32,9 @@ dfm$Doing <- tolower(dfm$Doing)
 ```
 
 ```{r}
-# variable specification
+# Data Cleaning 
 dfm$Doing <- gsub("e.g.,", "e.g.", dfm$Doing)
+
 # Define groups
 productive <- c("work or other productive activities", "chores/errands", 
                 "personal maintenance", 
@@ -38,53 +46,169 @@ exercise <- c("exercising/playing a sport")
 rest_sleep <- c("sleeping/napping", "doing absolutely nothing")
 baby_care <- c("feeding the baby", "changing the baby")
 
-# Classify activities into categories, accounting for multiple selections
-dfm <- dfm %>% 
+# Classify activities into categories, accounting for multiple selections, modified including other option, dummy coding each activity 
+dfm <- dfm %>%
   mutate(
-    Productive = ifelse(grepl(paste(productive, collapse = "|"), Doing, ignore.case = TRUE), "Productive Activities", NA),
-    Social_Face = ifelse(grepl(paste(social_face, collapse = "|"), Doing, ignore.case = TRUE), "Socializing Face-to-Face", NA),
-    Social_Virtual = ifelse(grepl(paste(social_virtual, collapse = "|"), Doing, ignore.case = TRUE), "Socializing Virtually", NA),
-    Screen_Time_Leisure = ifelse(grepl(paste(screen_time_leisure, collapse = "|"), Doing, ignore.case = TRUE), "Screen Time (Leisure)", NA),
-    Exercise = ifelse(grepl(paste(exercise, collapse = "|"), Doing, ignore.case = TRUE), "Exercise", NA),
-    Rest_Sleep = ifelse(grepl(paste(rest_sleep, collapse = "|"), Doing, ignore.case = TRUE), "Rest and Sleep", NA),
-    Baby_Care = ifelse(grepl(paste(baby_care, collapse = "|"), Doing, ignore.case = TRUE), "Baby Care", NA)
-  ) %>% 
+    Productive = ifelse(grepl(paste(productive, collapse = "|"), Doing, ignore.case = TRUE), 1, 0),
+    Social_Face = ifelse(grepl(paste(social_face, collapse = "|"), Doing, ignore.case = TRUE), 1, 0),
+    Social_Virtual = ifelse(grepl(paste(social_virtual, collapse = "|"), Doing, ignore.case = TRUE), 1, 0),
+    Screen_Time_Leisure = ifelse(grepl(paste(screen_time_leisure, collapse = "|"), Doing, ignore.case = TRUE), 1, 0),
+    Exercise = ifelse(grepl(paste(exercise, collapse = "|"), Doing, ignore.case = TRUE), 1, 0),
+    Rest_Sleep = ifelse(grepl(paste(rest_sleep, collapse = "|"), Doing, ignore.case = TRUE), 1, 0),
+    Baby_Care = ifelse(grepl(paste(baby_care, collapse = "|"), Doing, ignore.case = TRUE), 1, 0)
+  ) %>%
   rowwise() %>%
   mutate(
-    Activity.Category = paste(na.omit(unique(c(Productive, Social_Face, Social_Virtual, Screen_Time_Leisure, Exercise, Rest_Sleep, Baby_Care))), collapse = ", "),
-    Activity.Category = ifelse(Activity.Category == "" & !is.na(Doing), "Other", Activity.Category) # Label all others as "Other"
+    # Combine all categories into a single string, separated by commas
+    Activity.Category = paste(
+      na.omit(unique(c(
+        ifelse(Productive == 1, "Productive Activities", NA),
+        ifelse(Social_Face == 1, "Socializing Face-to-Face", NA),
+        ifelse(Social_Virtual == 1, "Socializing Virtually", NA),
+        ifelse(Screen_Time_Leisure == 1, "Screen Time (Leisure)", NA),
+        ifelse(Exercise == 1, "Exercise", NA),
+        ifelse(Rest_Sleep == 1, "Rest and Sleep", NA),
+        ifelse(Baby_Care == 1, "Baby Care", NA)
+      ))),
+      collapse = ", "
+    ),
+    
+    # If more than one category is identified, set as "Other"
+    # Activity.Category = ifelse(grepl(",", Activity.Category), "Other", Activity.Category),
+    
+    # Label as "Other" if no category is identified but `Doing` is not NA
+    Activity.Category = ifelse(Activity.Category == "" & !is.na(Doing), "Other", Activity.Category)
   ) %>%
-  ungroup() # %>%
-  # select(-Productive, -Social_Face, -Social_Virtual, -Screen_Time_Leisure, -Exercise, -Rest_Sleep, -Baby_Care) # Remove intermediate columns
+  ungroup()
+
+# Creating a model that aggregates across composites for one per entry 
+dfm.ag <- dfm %>% 
+  dplyr::group_by(record_id, Composite, Activity.Category, DAY, SIG, Duration..in.seconds.) %>% 
+  dplyr::summarise(across(where(is.numeric), ~mean(.x, na.rm = TRUE)))%>%  # This is modeling each signal separately
+  ungroup()
 ```
+
+```{r}
+## Variable Summary
+## plotting
+ggplot(
+  dfm.ag[!is.na(dfm.ag$Activity.Category) & dfm.ag$Activity.Category != "" & 
+         dfm.ag$Composite != "Other" & dfm.ag$Activity.Category != "Mix",], 
+  aes(x = Composite, y = value, fill = Activity.Category)
+) + 
+  my_opts +
+  stat_summary(fun.y = mean, geom = "bar", position = position_dodge(width = 0.95), alpha = 0.7) +
+  stat_summary(fun.data = mean_cl_boot, geom = "errorbar", width = 0.3, position = position_dodge(width = 0.95)) +
+  labs(
+    x = "Emotion", 
+    y = "How do you feel right now?"
+  ) +
+  my_opts + 
+  coord_cartesian(ylim = c(1, 3.5)) +
+  theme(legend.position = "none")
+```
+
+# Model
+
+Let $y$ = value_wc, $g$ = Activity.Category
+
+Model: 
+$$
+  \begin{aligned}
+    y_{i} & \sim N(\mu_i, \sigma_1) \\
+    \mu_i \sim \sum_j a_j*g_{i,j}+\ b \\
+  \end{aligned}
+$$ 
+$y_i$ and $g_{i,j}$ are observables.
+
+Prior: 
+
+$$
+
+\begin{aligned}
+    b & \sim N(0,1) \\
+    a_j & \sim N(0,1) \\
+    \sigma & \sim N(0,1) \\
+
+\end{aligned}
+
+$$
 
 ```{r}
 ## Model
 # Changing the reference 
 dfm.ag$Activity.Category <- relevel(as.factor(dfm.ag$Activity.Category), ref="Rest and Sleep")
 
-# Comparing a big model with positive and negative affect
-Activity.Category.fit <- lme(value_wc ~  Composite*Activity.Category, data=dfm.ag[!dfm.ag$Activity.Category %in% c("Mix") & dfm.ag$Composite %in% c("NegAff", "PosAff"),], random=~1 | record_id, na.action=na.omit)
-anova(Activity.Category.fit) 
-summary(Activity.Category.fit) 
+#####
+# Centering within and between person for each emotion
+#####
+dfm.ag <- dfm.ag %>% group_by(record_id, Composite) %>% 
+  dplyr::mutate(w_mean = mean(value, na.rm = T)) %>% ungroup() %>%
+  dplyr::mutate(value_bc = scale(value, center = T, scale = F),
+                value_wc = value - w_mean) 
 
-# Comparing activity catergory for negative affect
-Activity.Category.fit <- lme(value_wc ~ Activity.Category, random=~1 | record_id, na.action=na.omit, data=dfm.ag[!dfm.ag$Activity.Category %in% c("Mix") & dfm.ag$Composite %in% c("NegAff"),], control=lmeControl(opt='optim'))
+dfm.ag <- dfm.ag %>%
+  mutate(
+    Composite = as.factor(Composite),
+    Activity.Category = as.factor(Activity.Category),
+    value = as.numeric(value)
+  )
 
-# Comparing alone, baby, close, and distant for Positive affect
-Activity.Category.fit <- lme(value_wc ~ Activity.Category, random=~1 | record_id, na.action=na.omit, data=dfm.ag[!dfm.ag$Activity.Category %in% c("Mix") & dfm.ag$Composite %in% c("PosAff"),], control=lmeControl(opt='optim'))
+# Model for Negative Affect
+Activity.Category.fit_neg <- brm(
+  value_wc ~ Activity.Category + (1 | record_id),
+  data = dfm.ag[!dfm.ag$Activity.Category %in% c("Mix") & dfm.ag$Composite %in% c("NegAff"), ],
+  family = gaussian(),
+  chains = 4,
+  cores = parallel::detectCores(),  # Utilize multiple cores for faster sampling
+  iter = 2000,                     # Number of iterations
+  control = list(adapt_delta = 0.95) # Increase adapt_delta for better convergence
+)
+
+# Model for Positive Affect
+Activity.Category.fit_pos <- brm(
+          value_wc ~ Activity.Category + (1 | record_id),
+  data = dfm.ag[!dfm.ag$Activity.Category %in% c("Mix") & dfm.ag$Composite %in% c("PosAff"), ],
+  family = gaussian(),
+  chains = 4,
+  cores = parallel::detectCores(),
+  iter = 2000,
+  control = list(adapt_delta = 0.95)
+)
+
+get_prior(
+  formula = value_wc ~ Activity.Category + (1 | record_id),
+  data = dfm.ag[!dfm.ag$Activity.Category %in% c("Mix") & dfm.ag$Composite %in% c("PosAff"), ],
+  family = gaussian()
+)
+
 ```
 
 ```{r}
 ## Results
-# Table showing distribution of all unique categories
-social_table <- as.data.frame(table(dfm$Activity.Category))
-print(social_table)
+# Extract posterior draws and plot rank histograms for specified parameters
+as_draws(Activity.Category.fit_neg) |>
+  mcmc_rank_hist(pars = c("b_Intercept", "b_Activity.Category", "sigma"), )
 
-ggplot(dfm.ag[!is.na(dfm.ag$Activity.Category) & dfm.ag$Composite != "Other" & dfm.ag$Activity.Category != "Mix",], aes(x = Composite, y = value, fill = Activity.Category)) + my_opts +
-  stat_summary(fun.y = mean, geom = "bar", position=position_dodge(width=0.95), alpha = .7) +
-  stat_summary(fun.data = mean_cl_boot, geom = "errorbar", width=.3, position=position_dodge(width=0.95)) +
-  labs(x = "Emotion", y = "How do you feel right now?") +
-  my_opts + coord_cartesian(ylim=c(1,3.5)) +
-  theme(legend.position = "none")
+as_draws(Activity.Category.fit_pos) |>
+  mcmc_rank_hist(pars = c("b_Intercept", "b_Activity.Category", "sigma"), )
+```
+
+```{r}
+# co-efficient table
+# Extract summary statistics for specific parameters
+param_summary <- posterior_summary(Activity.Category.fit_neg, pars = c("b_Activity.CategoryBabyCare", "b_Activity.CategoryExercise", 
+                            "b_Activity.CategoryProductiveActivities", 
+                            "b_Activity.CategoryRestandSleep"))
+# Print the summary
+print(param_summary)
+
+param_summary <- posterior_summary(Activity.Category.fit_pos, pars = c("b_Activity.CategoryBabyCare", "b_Activity.CategoryExercise", 
+                            "b_Activity.CategoryProductiveActivities", 
+                            "b_Activity.CategoryRestandSleep"))
+# Print the summary
+print(param_summary)
+
+pp_check(Activity.Category.fit_neg)
+pp_check(Activity.Category.fit_pos)
 ```
