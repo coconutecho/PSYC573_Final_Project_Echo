@@ -129,33 +129,62 @@ ggplot(
 # Model
 
 Let $y$ = value_wc, $g$ = Activity.Category
+i represents participant
+j represents number of activity catergory
+t means observation time points 
 
 Model:
-
 $$
   \begin{aligned}
-    y_{i} & \sim N(\mu_i, \sigma_1) \\
-    \mu_i \sim \sum_j a_j*g_{i,j}+\ b \\
+    y_{ti} & \sim N(\mu_{ti}, \sigma_1) \\
+    \mu_{ti}& = \sum_j \beta_{1ij}*g_{ij}+\ \beta_{0i} \\
+    \beta_{0i} & \sim N(\mu_{\beta0},\sigma_{\beta0}) \\ 
+    \beta_{1ij}& \sim N(\mu_{\beta_{1ij}}, \sigma_{\beta_{1ij}}) \\ 
   \end{aligned}
 $$
 
-$y_i$ and $g_{i,j}$ are observables.
+$y_i$ and $g_{ij}$ are observables.
 
-Prior:
+Prior: 
 $$ 
    \begin{aligned} 
-   b & \sim N(0,1) \\ a_j & \sim N(0,1) \\ \sigma & \sim Cauchy(0,2)
+      \sigma_{1}& \sim N(0,1) \\
+   \sigma_{\beta{0}} & \sim N(0,1)\\
+   \mu_{\beta{0}} & \sim N(0,1)\\
+   \mu_{\beta_{1ij}}& \sim N(0,1) \\
+   \sigma_{\beta_{1ij}}& \sim N(0,1) \\
    \end{aligned} 
 $$
 
 ```{r}
 ## Model
-df = dfm.ag
+#####
+# Centering within and between person for each emotion
+#####
+dfm.ag <- dfm.ag %>% group_by(record_id, Composite) %>% 
+  dplyr::mutate(w_mean = mean(value, na.rm = T)) %>% ungroup() %>%
+  dplyr::mutate(value_bc = scale(value, center = T, scale = T)[,1],
+                value_wc = value - w_mean) 
+
+dfm.ag <- dfm.ag %>%
+  mutate(
+    Composite = as.factor(Composite),
+    Activity.Category = as.factor(Activity.Category),
+    value = as.numeric(value)
+  )
+
+dfm.ag <- dfm.ag %>% drop_na(value_bc)
+dfm.pos <- dfm.ag %>% filter(Composite == "PosAff")
+dfm.neg <- dfm.ag %>% filter(Composite == "NegAff")
+dfm.oth <- dfm.ag %>% filter(Composite == "Other")
+
+df = dfm.pos
 
 train_size <- floor(0.9 * nrow(df))
 train_ind <- sample(seq_len(nrow(df)), size = train_size)
 train_df <- df[train_ind, ]
 test_df <- df[-train_ind, ]
+
 # Create the matrix `g` from binary indicator columns
 # Replace the column names below with the actual names of your binary columns
 binary_columns <- c("Productive", "Social_Face", "Social_Virtual", 
@@ -163,22 +192,30 @@ binary_columns <- c("Productive", "Social_Face", "Social_Virtual",
 
 # observations
 g <- as.matrix(train_df[binary_columns])
-y <- train_df$value_wc
+y <- train_df$value_bc
 test_g <- as.matrix(test_df[binary_columns])
-test_y <- train_df$value_wc
+test_y <- train_df$value_bc
 # Number of activities (columns in g)
 J <- ncol(g)
 # Number of observations (rows in g)
 N <- nrow(g)
+
+pid <- factor(train_df$record_id)
+P <- length(unique(pid))
 
 # Prepare the data list for Stan
 stan_data <- list(
   J = J,      # Number of clusters (activities)
   N = N,      # Number of observations
   y = y,      # Response variable
-  g = g       # Transpose g to match Stan's `J x N` format
+  g = g,      # Transpose g to match Stan's `J x N` format
+  P = P,      # number of participants
+  pid = pid   # index of participant
 )
+```
 
+```{r}
+## Results
 # Load and compile the Stan model
 model <- cmdstan_model("model.stan")
 n_chains <- 4
@@ -188,19 +225,16 @@ fit <- model$sample(
   data = stan_data,        
   chains = n_chains,                 # Number of chains
   parallel_chains = n_chains,        # Run chains in parallel
-  iter_sampling = 5000,       # Number of iterations
+  iter_sampling = 4000,       # Number of iterations
   iter_warmup = 1000,         # Number of warmup iterations
   thin = 5                    # thinning
 )
-```
 
-```{r}
-## Results
 # Print a summary of the model results
 summary <- fit$summary(variables = c("a", "b", "sigma"))
 
 # fit$cmdstan_diagnose()       # Diagnose any issues
-fit$draws(variables = c("a", "b", "sigma")) %>% bayesplot::mcmc_trace()  # Trace plot
+fit$draws(variables = c("sigma")) %>% bayesplot::mcmc_trace()  # Trace plot
 
 posterior_predictive <- fit$draws(variables = "ytilde")
 
@@ -209,6 +243,6 @@ y_tilde_matrix <- posterior::as_draws_matrix(posterior_predictive)
 
 # Perform posterior predictive density overlay
 bayesplot::ppc_dens_overlay(y[1:125], y_tilde_matrix[,1:125])
-
-# pp_check(fit)
 ```
+
+The results suggest that the model fits okay to the actual data. Futher exploration can focus on simpler or model taking account variables like time points.  
